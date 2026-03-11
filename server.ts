@@ -40,9 +40,16 @@ function createChatSession(ai: GoogleGenAI) {
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json());
+  app.use(express.urlencoded({ extended: true }));
+  app.use((err: Error & { status?: number; type?: string }, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err?.type === "entity.parse.failed" || err?.status === 400) {
+      return res.status(400).json({ error: "Invalid request body. Send JSON or form-encoded data." });
+    }
+    next(err);
+  });
 
   // Health check
   app.get("/api/health", (req, res) => {
@@ -54,28 +61,45 @@ async function startServer() {
    *   - Web chat:   { message, sessionId }
    *   - n8n/WAHA:  { message, sender_number, tenant_slug? }
    *
-   * Response includes both `response` (web) and `data` (n8n Send Text Reply node)
+  * Response includes both `response` (web) and `data` (n8n Send Text Reply node)
    */
   app.post("/api/agent/chat", async (req, res) => {
-    const { message, sessionId, sender_number } = req.body;
-
-    // Support both calling conventions
-    const effectiveSessionId = sessionId || sender_number;
-    const channel = sender_number ? "whatsapp" : "web";
-
-    if (!message || !effectiveSessionId) {
-      return res.status(400).json({
-        error: "Provide either { message, sessionId } (web) or { message, sender_number } (WhatsApp).",
-      });
-    }
-
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      console.error("GEMINI_API_KEY is missing");
-      return res.status(500).json({ error: "GEMINI_API_KEY not configured" });
-    }
-
     try {
+      let payload: Record<string, unknown> = {};
+
+      if (req.body && typeof req.body === "object") {
+        payload = req.body as Record<string, unknown>;
+      } else if (typeof req.body === "string") {
+        try {
+          const parsed = JSON.parse(req.body);
+          if (parsed && typeof parsed === "object") {
+            payload = parsed as Record<string, unknown>;
+          }
+        } catch {
+          payload = {};
+        }
+      }
+
+      const message = typeof payload.message === "string" ? payload.message.trim() : "";
+      const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
+      const sender_number = typeof payload.sender_number === "string" ? payload.sender_number : "";
+
+      // Support both calling conventions
+      const effectiveSessionId = sessionId || sender_number;
+      const channel = sender_number ? "whatsapp" : "web";
+
+      if (!message || !effectiveSessionId) {
+        return res.status(400).json({
+          error: "Provide either { message, sessionId } (web) or { message, sender_number } (WhatsApp).",
+        });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        console.error("GEMINI_API_KEY is missing");
+        return res.status(500).json({ error: "GEMINI_API_KEY not configured" });
+      }
+
       const ai = new GoogleGenAI({ apiKey });
 
       if (!chatSessions.has(effectiveSessionId)) {
