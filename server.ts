@@ -104,4 +104,15 @@ async function startServer() {
   });
 }
 
-startServer();
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception thrown:", err);
+});
+
+startServer().catch((err) => {
+  console.error("Failed to start server:", err);
+  process.exit(1);
+});
