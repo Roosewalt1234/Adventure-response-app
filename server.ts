@@ -38,10 +38,42 @@ async function initDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
       CREATE INDEX IF NOT EXISTS idx_sender_id ON chat_history(sender_id);
+
+      CREATE TABLE IF NOT EXISTS user_state (
+        sender_id TEXT PRIMARY KEY,
+        state JSONB DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
     `);
-    console.log("✅ Database table initialized.");
+    console.log("✅ Database tables initialized.");
   } catch (err) {
     console.error("❌ Failed to initialize database:", err);
+  }
+}
+
+async function getUserState(senderId: string) {
+  if (pool) {
+    try {
+      const result = await pool.query("SELECT state FROM user_state WHERE sender_id = $1", [senderId]);
+      return result.rows[0]?.state || {};
+    } catch (err) {
+      console.error("Error fetching user state:", err);
+      return {};
+    }
+  }
+  return {};
+}
+
+async function updateUserState(senderId: string, state: any) {
+  if (pool) {
+    try {
+      await pool.query(
+        "INSERT INTO user_state (sender_id, state, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP) ON CONFLICT (sender_id) DO UPDATE SET state = EXCLUDED.state, updated_at = CURRENT_TIMESTAMP",
+        [senderId, state]
+      );
+    } catch (err) {
+      console.error("Error updating user state:", err);
+    }
   }
 }
 
@@ -103,7 +135,19 @@ async function startServer() {
 
   app.use(express.json());
 
-  // API endpoint for n8n to talk TO the agent
+  // Endpoint to resume Natalia (unpause)
+  app.post("/api/agent/resume", async (req, res) => {
+    const { from } = req.body;
+    if (!from) return res.status(400).json({ error: "from (senderId) is required" });
+    
+    const currentState = await getUserState(from);
+    await updateUserState(from, { ...currentState, is_escalated: false });
+    
+    console.log(`🔓 Natalia resumed for ${from}`);
+    res.json({ status: "resumed", message: `Natalia is now listening to ${from} again.` });
+  });
+
+  // API endpoint for n8n talk TO the agent
   app.post("/api/agent/chat", async (req, res) => {
     console.log("--- New Agent Chat Request ---");
     console.log("Body:", JSON.stringify(req.body, null, 2));
@@ -113,6 +157,19 @@ async function startServer() {
     if (!message) {
       console.error("Error: No message provided in request body");
       return res.status(400).json({ error: "Message is required. Ensure you are sending {'message': 'your text'} in the JSON body." });
+    }
+
+    const senderId = from || "anonymous";
+    const userState = await getUserState(senderId);
+
+    // SILENCE LOGIC: If escalated, do not respond
+    if (userState.is_escalated) {
+      console.log(`🤫 Natalia is silent for ${senderId} (Escalated to Manager)`);
+      return res.json({ 
+        response: null, 
+        status: "paused_for_manager",
+        from: from || null 
+      });
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
@@ -126,8 +183,16 @@ async function startServer() {
       const ai = new GoogleGenAI({ apiKey });
       
       // Get history for this sender
-      const senderId = from || "anonymous";
       const history = await getHistory(senderId);
+
+      // Add state context to system instruction if needed
+      let dynamicInstruction = SYSTEM_INSTRUCTION;
+      if (userState.offered_deposit_discount) {
+        dynamicInstruction += "\n\nNote: You have already offered a 500 AED discount on the deposit. If they ask for more, escalate to the manager.";
+      }
+      if (userState.offered_rent_promo) {
+        dynamicInstruction += "\n\nNote: You have already given the 'Ramadhan Promo' message for rent. If they ask for a rent discount again, escalate to the manager.";
+      }
 
       const notifyManagerTool = {
         functionDeclarations: [{
@@ -140,12 +205,16 @@ async function startServer() {
                 type: Type.STRING,
                 description: "The original question or request from the customer."
               },
+              reason: {
+                type: Type.STRING,
+                description: "The reason for escalation: 'negotiation' or 'unknown_question'."
+              },
               context: {
                 type: Type.STRING,
                 description: "Any additional relevant details about the conversation."
               }
             },
-            required: ["customer_query"]
+            required: ["customer_query", "reason"]
           }
         }]
       };
@@ -160,22 +229,47 @@ async function startServer() {
         model: "gemini-3-flash-preview",
         contents: contents,
         config: {
-          systemInstruction: SYSTEM_INSTRUCTION,
+          systemInstruction: dynamicInstruction,
           tools: [notifyManagerTool]
         }
       });
 
-      const responseText = response.text || "I'm sorry, I couldn't process that.";
+      let responseText = response.text || "";
+      const functionCalls = response.functionCalls;
+
+      // Track if we gave the rent promo
+      if (responseText.includes("Ramadhan Promo offer")) {
+        await updateUserState(senderId, { ...userState, offered_rent_promo: true });
+      }
+
+      if (functionCalls && functionCalls.length > 0) {
+        console.log("🛠️ Natalia is calling notify_manager tool...");
+        const call = functionCalls[0];
+        const args = call.args as any;
+        
+        // Mark as escalated in database
+        await updateUserState(senderId, { ...userState, is_escalated: true });
+
+        // If the model didn't provide text, give a default escalation message
+        if (!responseText) {
+          responseText = "I will check with my manager and get back to you shortly. 😊";
+        }
+      }
+
+      if (!responseText) {
+        responseText = "I'm sorry, I couldn't process that.";
+      }
 
       // Save this exchange to history
       await saveHistory(senderId, "user", message);
       await saveHistory(senderId, "model", responseText);
 
-      const functionCalls = response.functionCalls;
       if (functionCalls && functionCalls.length > 0) {
-        console.log("🛠️ Natalia is calling notify_manager tool...");
         const call = functionCalls[0];
-        
+        const args = call.args as any;
+        // Check if this is a deposit discount request
+        const isDepositDiscount = args.reason === "negotiation" && /deposit|advance/i.test(args.customer_query || "");
+
         // Trigger the n8n webhook in the background
         const webhookUrl = process.env.N8N_WEBHOOK_URL;
         if (webhookUrl) {
@@ -184,9 +278,39 @@ async function startServer() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               event: "manager_escalation",
+              escalation_type: args.reason, // Differentiate for n8n IF node
+              is_deposit_discount: isDepositDiscount,
               ...call.args
             })
           }).catch(err => console.error("Failed to notify n8n:", err));
+        }
+
+        // If it's a deposit discount, schedule the 3-minute follow-up
+        if (isDepositDiscount && !userState.offered_deposit_discount) {
+          console.log(`⏰ Scheduling 3-minute follow-up for ${senderId}`);
+          setTimeout(async () => {
+            const followUpMessage = "I've checked with the manager, and we can offer a reduction of 500.00 AED on the deposit/advance. 😊 Beyond this, I'm afraid we can't go lower. Shall I proceed with the booking?";
+            
+            // Save follow-up to history
+            await saveHistory(senderId, "model", followUpMessage);
+            
+            // Update state
+            const currentState = await getUserState(senderId);
+            await updateUserState(senderId, { ...currentState, offered_deposit_discount: true });
+
+            // Send to n8n so it can push to WhatsApp
+            if (webhookUrl) {
+              fetch(webhookUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  event: "proactive_message",
+                  message: followUpMessage,
+                  from: senderId
+                })
+              }).catch(err => console.error("Failed to send proactive message to n8n:", err));
+            }
+          }, 3 * 60 * 1000); // 3 minutes
         }
       }
 

@@ -21,38 +21,29 @@ const notifyManagerDeclaration: FunctionDeclaration = {
 };
 
 export class GeminiService {
-  private ai: GoogleGenAI;
-  private chat: any;
-
-  constructor() {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is missing");
-    }
-    this.ai = new GoogleGenAI({ apiKey });
-    this.chat = this.ai.chats.create({
-      model: "gemini-3-flash-preview",
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        tools: [{ functionDeclarations: [notifyManagerDeclaration] }],
-      },
-    });
-  }
-
-  async sendMessage(message: string, onFunctionCall?: (name: string, args: any) => Promise<void>) {
+  async sendMessage(message: string, from: string = "website-user") {
     try {
-      const result = await this.chat.sendMessage({ message });
-      
-      const functionCalls = result.functionCalls;
-      if (functionCalls && onFunctionCall) {
-        for (const call of functionCalls) {
-          await onFunctionCall(call.name, call.args);
-        }
+      const response = await fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message, from }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`);
       }
 
-      return result.text;
+      const data = await response.json();
+      
+      if (data.status === "paused_for_manager") {
+        return null; // Signal that the agent is paused
+      }
+
+      return data.response;
     } catch (error) {
-      console.error("Gemini API Error:", error);
+      console.error("Agent API Error:", error);
       return "I'm sorry, I'm having trouble connecting right now. Please try again or contact us via WhatsApp: +971 52 343 5089.";
     }
   }

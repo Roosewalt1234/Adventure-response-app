@@ -57,6 +57,14 @@ export default function App() {
     scrollToBottom();
   }, [messages]);
 
+  const [userId] = useState(() => {
+    const saved = localStorage.getItem('adventure_user_id');
+    if (saved) return saved;
+    const newId = 'user_' + Math.random().toString(36).substring(2, 9);
+    localStorage.setItem('adventure_user_id', newId);
+    return newId;
+  });
+
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!input.trim() || isLoading) return;
@@ -73,32 +81,26 @@ export default function App() {
     setIsLoading(true);
 
     try {
-      const response = await geminiService.sendMessage(input, async (name, args) => {
-        if (name === 'notify_manager') {
-          console.log('Escalating to n8n:', args);
-          try {
-            await fetch('/api/n8n', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                event: 'escalation',
-                customer: 'Website User',
-                ...args,
-                timestamp: new Date().toISOString()
-              })
-            });
-          } catch (err) {
-            console.error('Failed to notify n8n:', err);
-          }
-        }
-      });
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: response,
-        timestamp: new Date(),
-      };
-      setMessages(prev => [...prev, assistantMessage]);
+      const response = await geminiService.sendMessage(input, userId);
+      
+      if (response === null) {
+        // Agent is escalated/paused
+        const assistantMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: "A manager has been notified and will be with you shortly. Natalia is currently standing by. 🙏",
+          timestamp: new Date(),
+        };
+        setMessages(prev => [...prev, assistantMessage]);
+      } else {
+        const assistantMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: response,
+          timestamp: new Date(),
+        };
+        setMessages(prev => [...prev, assistantMessage]);
+      }
     } catch (error) {
       console.error('Error sending message:', error);
     } finally {
