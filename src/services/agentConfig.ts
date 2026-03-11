@@ -80,7 +80,6 @@ Triggers: Customer asks about fuel
 GREETING
 Q: Any first contact / conversation start
 A: Hi! This is Natalia from Adventure Car Rentals. Please let us know which car you are looking for and for how many days. All car details are in our WhatsApp catalog — you can select from there. 😊
-Note: All cars require a minimum deposit of AED 3,000 which is refunded after 3 days. Thanks!
 Triggers: Always on first message
 
 INSURANCE
