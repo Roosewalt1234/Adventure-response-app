@@ -44,6 +44,17 @@ async function initDatabase() {
         state JSONB DEFAULT '{}'::jsonb,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+
+      CREATE TABLE IF NOT EXISTS escalations (
+        id SERIAL PRIMARY KEY,
+        sender_id TEXT NOT NULL,
+        customer_query TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_escalations_sender_id ON escalations(sender_id);
+      CREATE INDEX IF NOT EXISTS idx_escalations_status ON escalations(status);
     `);
     console.log("✅ Database tables initialized.");
   } catch (err) {
@@ -73,6 +84,20 @@ async function updateUserState(senderId: string, state: any) {
       );
     } catch (err) {
       console.error("Error updating user state:", err);
+    }
+  }
+}
+
+async function createEscalation(senderId: string, query: string, reason: string) {
+  if (pool) {
+    try {
+      await pool.query(
+        "INSERT INTO escalations (sender_id, customer_query, reason) VALUES ($1, $2, $3)",
+        [senderId, query, reason]
+      );
+      console.log(`📝 Escalation recorded for ${senderId}`);
+    } catch (err) {
+      console.error("Error creating escalation record:", err);
     }
   }
 }
@@ -143,6 +168,18 @@ async function startServer() {
     const currentState = await getUserState(from);
     await updateUserState(from, { ...currentState, is_escalated: false });
     
+    // Mark escalations as resolved
+    if (pool) {
+      try {
+        await pool.query(
+          "UPDATE escalations SET status = 'resolved' WHERE sender_id = $1 AND status = 'pending'",
+          [from]
+        );
+      } catch (err) {
+        console.error("Error resolving escalations:", err);
+      }
+    }
+    
     console.log(`🔓 Natalia resumed for ${from}`);
     res.json({ status: "resumed", message: `Natalia is now listening to ${from} again.` });
   });
@@ -168,7 +205,8 @@ async function startServer() {
       return res.json({ 
         response: null, 
         status: "paused_for_manager",
-        from: from || null 
+        from: from || null,
+        is_escalated: true
       });
     }
 
@@ -249,6 +287,9 @@ async function startServer() {
         
         // Mark as escalated in database
         await updateUserState(senderId, { ...userState, is_escalated: true });
+        
+        // Record the escalation in the new table
+        await createEscalation(senderId, args.customer_query, args.reason);
 
         // If the model didn't provide text, give a default escalation message
         if (!responseText) {
@@ -269,21 +310,30 @@ async function startServer() {
         const args = call.args as any;
         // Check if this is a deposit discount request
         const isDepositDiscount = args.reason === "negotiation" && /deposit|advance/i.test(args.customer_query || "");
+      }
 
-        // Trigger the n8n webhook in the background
-        const webhookUrl = process.env.N8N_WEBHOOK_URL;
-        if (webhookUrl) {
-          fetch(webhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              event: "manager_escalation",
-              escalation_type: args.reason, // Differentiate for n8n IF node
-              is_deposit_discount: isDepositDiscount,
-              ...call.args
-            })
-          }).catch(err => console.error("Failed to notify n8n:", err));
-        }
+      // Trigger the n8n webhook for ALL responses if configured
+      const webhookUrl = process.env.N8N_WEBHOOK_URL;
+      if (webhookUrl) {
+        const isEscalated = !!(functionCalls && functionCalls.length > 0);
+        const args = isEscalated ? (functionCalls[0].args as any) : null;
+        const isDepositDiscount = isEscalated && args.reason === "negotiation" && /deposit|advance/i.test(args.customer_query || "");
+
+        fetch(webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            event: isEscalated ? "manager_escalation" : "agent_reply",
+            message: responseText,
+            from: senderId,
+            is_escalated: isEscalated,
+            metadata: isEscalated ? {
+              reason: args.reason,
+              customer_query: args.customer_query,
+              is_deposit_discount: isDepositDiscount
+            } : null
+          })
+        }).catch(err => console.error("Failed to notify n8n:", err));
 
         // If it's a deposit discount, schedule the 3-minute follow-up
         if (isDepositDiscount && !userState.offered_deposit_discount) {
@@ -291,26 +341,21 @@ async function startServer() {
           setTimeout(async () => {
             const followUpMessage = "I've checked with the manager, and we can offer a reduction of 500.00 AED on the deposit/advance. 😊 Beyond this, I'm afraid we can't go lower. Shall I proceed with the booking?";
             
-            // Save follow-up to history
             await saveHistory(senderId, "model", followUpMessage);
-            
-            // Update state
             const currentState = await getUserState(senderId);
             await updateUserState(senderId, { ...currentState, offered_deposit_discount: true });
 
-            // Send to n8n so it can push to WhatsApp
-            if (webhookUrl) {
-              fetch(webhookUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  event: "proactive_message",
-                  message: followUpMessage,
-                  from: senderId
-                })
-              }).catch(err => console.error("Failed to send proactive message to n8n:", err));
-            }
-          }, 3 * 60 * 1000); // 3 minutes
+            fetch(webhookUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                event: "proactive_message",
+                message: followUpMessage,
+                from: senderId,
+                is_escalated: false
+              })
+            }).catch(err => console.error("Failed to send proactive message to n8n:", err));
+          }, 3 * 60 * 1000);
         }
       }
 
@@ -319,7 +364,8 @@ async function startServer() {
       res.json({ 
         response: responseText,
         sender: "Natalia",
-        from: from || null
+        from: from || null,
+        is_escalated: !!(functionCalls && functionCalls.length > 0)
       });
     } catch (error) {
       console.error("Error in agent chat endpoint:", error);
