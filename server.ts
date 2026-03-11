@@ -277,6 +277,11 @@ async function startServer() {
         await updateUserState(senderId, { ...userState, offered_rent_promo: true });
       }
 
+      // Track if we gave the deposit discount
+      if (responseText.includes("500 AED discount on the deposit/advance")) {
+        await updateUserState(senderId, { ...userState, offered_deposit_discount: true });
+      }
+
       if (functionCalls && functionCalls.length > 0) {
         console.log("🛠️ Natalia is calling notify_manager tool...");
         const call = functionCalls[0];
