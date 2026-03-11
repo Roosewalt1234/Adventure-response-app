@@ -73,25 +73,7 @@ export default function App() {
     setIsLoading(true);
 
     try {
-      const response = await geminiService.sendMessage(input, async (name, args) => {
-        if (name === 'notify_manager') {
-          console.log('Escalating to n8n:', args);
-          try {
-            await fetch('/api/n8n', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                event: 'escalation',
-                customer: 'Website User',
-                ...args,
-                timestamp: new Date().toISOString()
-              })
-            });
-          } catch (err) {
-            console.error('Failed to notify n8n:', err);
-          }
-        }
-      });
+      const response = await geminiService.sendMessage(input);
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
@@ -334,7 +316,7 @@ export default function App() {
         </div>
 
         {/* Input Area */}
-        <div className="p-6 bg-gradient-to-t from-[#0a0a0a] to-transparent">
+        <div className="p-6 bg-linear-to-t from-[#0a0a0a] to-transparent">
           <form 
             onSubmit={handleSend}
             className="max-w-4xl mx-auto relative group"
