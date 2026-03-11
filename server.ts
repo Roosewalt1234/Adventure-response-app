@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { SYSTEM_INSTRUCTION } from "./src/services/agentConfig";
 import pg from "pg";
+import path from "path";
 
 const { Pool } = pg;
 
@@ -152,10 +153,6 @@ async function startServer() {
   app.get("/api/health", (req, res) => {
     console.log("Health check requested");
     res.status(200).json({ status: "ok", message: "Natalia is ready!" });
-  });
-
-  app.get("/", (req, res) => {
-    res.send("Natalia Agent is Online");
   });
 
   app.use(express.json());
@@ -403,6 +400,77 @@ async function startServer() {
     }
   });
 
+  // Admin Stats Endpoint
+  app.get("/api/admin/stats", async (req, res) => {
+    const { range } = req.query; // today, week, month, all
+    if (!pool) return res.json({ error: "Database not connected" });
+
+    let timeFilter = "";
+    if (range === "today") timeFilter = "AND created_at >= CURRENT_DATE";
+    else if (range === "week") timeFilter = "AND created_at >= CURRENT_DATE - INTERVAL '7 days'";
+    else if (range === "month") timeFilter = "AND created_at >= CURRENT_DATE - INTERVAL '30 days'";
+
+    try {
+      const messages = await pool.query(`
+        SELECT 
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE role = 'user') as incoming,
+          COUNT(*) FILTER (WHERE role = 'model') as outgoing
+        FROM chat_history
+        WHERE 1=1 ${timeFilter}
+      `);
+
+      const contacts = await pool.query(`
+        SELECT COUNT(DISTINCT sender_id) as total FROM chat_history
+        WHERE 1=1 ${timeFilter}
+      `);
+
+      const escalations = await pool.query(`
+        SELECT COUNT(*) as total FROM escalations
+        WHERE 1=1 ${timeFilter}
+      `);
+
+      // Mock conversion rate for now (e.g. 5% of contacts)
+      const totalContacts = parseInt(contacts.rows[0].total || "0");
+      const converted = Math.floor(totalContacts * 0.05);
+
+      res.json({
+        messages: {
+          total: parseInt(messages.rows[0].total || "0"),
+          incoming: parseInt(messages.rows[0].incoming || "0"),
+          outgoing: parseInt(messages.rows[0].outgoing || "0"),
+          ai_replies: parseInt(messages.rows[0].outgoing || "0")
+        },
+        contacts: {
+          total: totalContacts,
+          new: totalContacts, // simplified
+          converted: converted,
+          human_takeovers: parseInt(escalations.rows[0].total || "0")
+        }
+      });
+    } catch (err) {
+      console.error("Error fetching stats:", err);
+      res.status(500).json({ error: "Failed to fetch stats" });
+    }
+  });
+
+  // Admin Escalations List
+  app.get("/api/admin/escalations", async (req, res) => {
+    if (!pool) return res.json([]);
+    try {
+      const result = await pool.query(`
+        SELECT e.*, u.state->>'is_escalated' as current_status
+        FROM escalations e
+        LEFT JOIN user_state u ON e.sender_id = u.sender_id
+        ORDER BY e.created_at DESC
+      `);
+      res.json(result.rows);
+    } catch (err) {
+      console.error("Error fetching escalations:", err);
+      res.status(500).json({ error: "Failed to fetch escalations" });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     console.log("🛠️ Loading Vite middleware...");
@@ -415,6 +483,9 @@ async function startServer() {
   } else {
     console.log("📦 Serving static files from dist/");
     app.use(express.static("dist"));
+    app.get("*", (req, res) => {
+      res.sendFile(path.resolve("dist", "index.html"));
+    });
   }
 
   app.listen(PORT, "0.0.0.0", () => {
