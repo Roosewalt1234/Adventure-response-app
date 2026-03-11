@@ -148,8 +148,11 @@ async function startServer() {
     else {
         app.use(express.static("dist"));
     }
-    app.listen(PORT, "0.0.0.0", () => {
-        console.log(`Server running on http://localhost:${PORT}`);
+    const server = app.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+    });
+    server.on("error", (err) => {
+        console.error("HTTP server failed:", err);
     });
 }
 startServer().catch((err) => {
