@@ -2,4 +2,4 @@
 buildCommand = "npm install && npm run build"
 
 [deploy]
-startCommand = "NODE_ENV=production npm start"
+startCommand = "npm start"

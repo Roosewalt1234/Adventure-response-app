@@ -2,7 +2,7 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
-import { SYSTEM_INSTRUCTION } from "./src/services/agentConfig";
+import { SYSTEM_INSTRUCTION } from "./src/services/agentConfig.js";
 
 dotenv.config();
 
@@ -41,6 +41,7 @@ function createChatSession(ai: GoogleGenAI) {
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
+  const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.RAILWAY_PROJECT_ID);
 
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
@@ -152,7 +153,7 @@ async function startServer() {
   });
 
   // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
